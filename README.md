@@ -49,5 +49,6 @@ jobs:
 - Not published to the GitHub Marketplace; personal use only
 - Consuming repositories must have merge commits disabled and squash merge enabled — the workflow will fail on the first run if this is not the case
 - Consuming repositories must use conventional commits for PR titles
+- The consuming release workflow must be marked as required in branch protection rules — when `init-check` fails, downstream jobs are skipped (neutral) not failed, so a rule requiring only individual jobs will not block merges
 - The workflow skips automatically when no version-bump-worthy commits exist since the last tag
 - The `pull_request_target` trigger includes `reopened` intentionally — Dependabot PRs can be closed and reopened when the base branch changes, and the title rewrite must fire again in that case
