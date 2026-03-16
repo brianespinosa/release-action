@@ -1,4 +1,4 @@
-name: Release Action (reusable)
+name: Release Action
 
 on:
   workflow_call:

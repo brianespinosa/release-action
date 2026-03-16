@@ -6,14 +6,14 @@ Guidance for Claude Code working in the `.github/` directory of `release-action`
 
 ## Workflow files
 
-- `workflows/release-action.yml` — the reusable workflow (`workflow_call`); this is what consumers reference
+- `workflows/release-workflow.yml` — the reusable workflow (`workflow_call`); this is what consumers reference
 - `workflows/release.yml` — the calling workflow; this repo dogfoods its own pipeline
 
 ---
 
 ## Workflow structure
 
-`release-action.yml` has two jobs, both gated by the `inputs.trigger` value passed from the caller:
+`release-workflow.yml` has two jobs, both gated by the `inputs.trigger` value passed from the caller:
 
 | Job | Runs when |
 |-----|-----------|
