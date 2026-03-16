@@ -37,17 +37,28 @@ jobs:
           SQUASH=$(echo "$REPO_DATA" | jq -r '.allow_squash_merge')
           MERGE=$(echo "$REPO_DATA" | jq -r '.allow_merge_commit')
 
-          if [[ "$SQUASH" == "null" || "$MERGE" == "null" ]]; then
-            echo "ERROR: jq could not parse expected fields from API response."
-            echo "  Response: ${REPO_DATA}"
+          # GitHub only returns allow_squash_merge and allow_merge_commit for tokens
+          # with admin access. The github.token in a workflow_call context only has
+          # the scopes granted in permissions: — admin is not a grantable scope.
+          # When both fields are absent, degrade gracefully: warn and skip the check.
+          # If only one field is absent that is unexpected and treated as an error.
+          if [[ "$SQUASH" == "null" && "$MERGE" == "null" ]]; then
+            echo "WARNING: Merge settings are not visible with the current token permissions."
+            echo "  allow_squash_merge and allow_merge_commit require admin API access."
+            echo "  Cannot enforce merge configuration at runtime with github.token."
+            echo "  Verify manually: allow_squash_merge=true, allow_merge_commit=false."
+          elif [[ "$SQUASH" == "null" || "$MERGE" == "null" ]]; then
+            echo "ERROR: Unexpected partial API response — only some merge setting fields were returned."
+            echo "  allow_squash_merge: ${SQUASH}"
+            echo "  allow_merge_commit: ${MERGE}"
             exit 1
-          fi
-
-          if [[ "$SQUASH" != "true" || "$MERGE" != "false" ]]; then
+          elif [[ "$SQUASH" != "true" || "$MERGE" != "false" ]]; then
             echo "ERROR: Repository must have squash merge enabled and merge commits disabled."
             echo "  allow_squash_merge: $SQUASH (expected: true)"
             echo "  allow_merge_commit: $MERGE (expected: false)"
             exit 1
+          else
+            echo "Repository merge settings verified: squash merge enabled, merge commits disabled."
           fi
 
   # Runs when the caller passes trigger: push — by convention, when the calling
