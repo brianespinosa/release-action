@@ -28,7 +28,7 @@ The actor check for `dependabot-major-prefix` is at the **job level**, not per-s
 2. **Write cliff.toml** — bash heredoc writing bundled config to working directory
 3. **Get current tag** — `git tag --list 'v*.*.*' --sort=-version:refname | head -1`; logs whether this is a first release or an existing tag
 4. **Install git-cliff** — `orhun/git-cliff-action@v4` with `args: --bumped-version`; followed by a **Verify git-cliff installation** step that confirms the binary is present at `$RUNNER_TEMP/git-cliff/bin`
-5. **Check if release needed** — direct binary call; stderr captured to temp file (not merged with stdout) to prevent warnings contaminating the version string; sets `skip=true` or `version` output (not both — `skip` is only written when skipping)
+5. **Check if release needed** — direct binary call; stderr captured to temp file (not merged with stdout) to prevent warnings contaminating the version string; sets `skip=true` or `version` output (not both — `skip` is only written when skipping); skip fires when `BUMPED` is empty, equal to `CURRENT`, or less than `CURRENT` (git-cliff emits a lower version when there is nothing to bump)
 6. **Generate changelog** — direct binary call; VERSION passed via env; stderr captured to temp file; multiline output written to `$GITHUB_OUTPUT` using `content<<CLIFF_OUTPUT` delimiter syntax
 7. **Create GitHub Release** — `gh release create`; guards against empty VERSION and CHANGELOG before running
 8. **Update alias tags** — force-update `vN` and `vN.M` with explicit per-push error handling and recovery instructions

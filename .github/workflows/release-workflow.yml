@@ -155,7 +155,9 @@ jobs:
 
           CURRENT="${{ steps.current.outputs.tag }}"
 
-          if [[ -z "$BUMPED" || "$BUMPED" == "$CURRENT" ]]; then
+          version_lt() { [[ "$(printf '%s\n' "$1" "$2" | sort -V | head -1)" == "$1" && "$1" != "$2" ]]; }
+
+          if [[ -z "$BUMPED" || "$BUMPED" == "$CURRENT" ]] || version_lt "$BUMPED" "$CURRENT"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
             echo "No version bump needed (git-cliff returned '${BUMPED}', current is '${CURRENT}'). Skipping release."
           else
