@@ -1,0 +1,168 @@
+name: Release Action (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      trigger:
+        description: The calling repo's github.event_name
+        required: true
+        type: string
+
+jobs:
+  release:
+    if: inputs.trigger == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Init check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          REPO_DATA=$(gh api /repos/${{ github.repository }})
+          SQUASH=$(echo "$REPO_DATA" | jq -r '.allow_squash_merge')
+          MERGE=$(echo "$REPO_DATA" | jq -r '.allow_merge_commit')
+
+          if [[ "$SQUASH" != "true" || "$MERGE" != "false" ]]; then
+            echo "ERROR: Repository must have squash merge enabled and merge commits disabled."
+            echo "  allow_squash_merge: $SQUASH (expected: true)"
+            echo "  allow_merge_commit: $MERGE (expected: false)"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Write cliff.toml
+        run: |
+          cat > cliff.toml << 'EOF'
+          [changelog]
+          header = ""
+          body = """
+          {% for group, commits in commits | group_by(attribute="group") %}
+          ### {{ group | upper_first }}\n
+          {% for commit in commits %}
+          - {{ commit.message | upper_first }}\
+          {% endfor %}
+          {% endfor %}
+          """
+          trim = true
+
+          [git]
+          conventional_commits = true
+          filter_unconventional = true
+          filter_commits = false
+          tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+          initial_tag = "v1.0.0"
+          features_always_bump_minor = true
+          breaking_always_bump_major = true
+
+          commit_parsers = [
+            { message = "^feat", group = "Features" },
+            { message = "^fix\\(deps\\)", group = "Dependencies" },
+            { message = "^fix", group = "Bug Fixes" },
+            { message = "^perf", group = "Performance" },
+            { message = "^refactor", group = "Refactor" },
+            { message = "^doc", group = "Documentation" },
+            { message = "^style", skip = true },
+            { message = "^test", skip = true },
+            { message = "^chore", skip = true },
+            { message = "^ci", skip = true },
+            { message = "^build", skip = true },
+          ]
+          EOF
+
+      - name: Get current tag
+        id: current
+        run: |
+          TAG=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Install git-cliff
+        uses: orhun/git-cliff-action@v4
+        with:
+          args: --bumped-version
+
+      - name: Check if release needed
+        id: check
+        run: |
+          export PATH="$RUNNER_TEMP/git-cliff/bin:$PATH"
+          BUMPED=$(git-cliff --bumped-version 2>/dev/null)
+          CURRENT="${{ steps.current.outputs.tag }}"
+
+          if [[ -z "$BUMPED" || "$BUMPED" == "$CURRENT" ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "No version bump needed. Skipping release."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "version=${BUMPED}" >> "$GITHUB_OUTPUT"
+            echo "Next version: ${BUMPED}"
+          fi
+
+      - name: Generate changelog
+        id: changelog
+        if: steps.check.outputs.skip != 'true'
+        uses: orhun/git-cliff-action@v4
+        with:
+          args: --unreleased --strip header --tag ${{ steps.check.outputs.version }}
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+          CHANGELOG: ${{ steps.changelog.outputs.content }}
+        run: |
+          gh release create "$VERSION" \
+            --notes "$CHANGELOG" \
+            --target "$GITHUB_SHA"
+
+      - name: Update alias tags
+        if: steps.check.outputs.skip != 'true'
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          MAJOR=$(echo "$VERSION" | cut -d. -f1)
+          MINOR=$(echo "$VERSION" | cut -d. -f1-2)
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag -f "$MAJOR" "${{ github.sha }}"
+          git tag -f "$MINOR" "${{ github.sha }}"
+
+          git push origin "$MAJOR" --force
+          git push origin "$MINOR" --force
+
+  dependabot-major-prefix:
+    if: inputs.trigger == 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Guard
+        if: github.actor != 'dependabot[bot]'
+        run: |
+          echo "Actor is not dependabot[bot]. Skipping."
+          exit 0
+
+      - name: Fetch metadata
+        id: metadata
+        if: github.actor == 'dependabot[bot]'
+        uses: dependabot/fetch-metadata@v2
+
+      - name: Rewrite title for major updates
+        if: >
+          github.actor == 'dependabot[bot]' &&
+          steps.metadata.outputs.update-type == 'version-update:semver-major'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          NEW_TITLE="${PR_TITLE/fix(deps)/feat(deps)!}"
+          gh pr edit "$PR_NUMBER" --title "$NEW_TITLE"
