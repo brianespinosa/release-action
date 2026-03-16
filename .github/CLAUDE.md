@@ -60,6 +60,12 @@ The actor check for `dependabot-major-prefix` is at the **job level**, not per-s
 - PATH to add: `$RUNNER_TEMP/git-cliff/bin` — the binary is NOT added to `$GITHUB_PATH` automatically
 - Do NOT use any outputs from the action. The "Generate changelog" step calls the binary directly and writes its own `content` key to `$GITHUB_OUTPUT` using the `content<<CLIFF_OUTPUT` heredoc delimiter. `steps.changelog.outputs.content` refers to that manually-written step output, not anything produced by the git-cliff action itself.
 
+### cliff.toml cannot be written with a shell heredoc
+
+The `run: |` YAML literal block parser terminates when it sees a non-empty line with less indentation than the block's first content line. Shell heredocs require the `EOF` end marker at column 0. These constraints are mutually exclusive: if the cliff.toml content is indented to satisfy YAML, the `EOF` marker at column 0 is outside the block and the YAML parser errors; if the content is at column 0 to satisfy bash, the YAML parser terminates the `run:` block at the first `[section]` header.
+
+The fix: put the TOML content in an `env:` variable (`CLIFF_TOML: |`) and write it with `printf '%s\n' "$CLIFF_TOML" > cliff.toml`. YAML strips the block indentation from the env value automatically. Do not convert this back to a heredoc.
+
 ### Alias tags must be excluded
 
 git-cliff and `git tag --list` must both exclude alias tags like `v1` and `v1.2`.

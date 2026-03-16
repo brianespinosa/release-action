@@ -72,46 +72,51 @@ jobs:
 
       # The cliff.toml config is bundled here rather than committed to consuming
       # repos so that all consumers share a single canonical configuration.
+      # It is written from an env var rather than a shell heredoc — heredocs require
+      # the EOF marker at column 0, but the YAML literal block parser terminates
+      # run: | at any line with less indentation than the block's first content line.
+      # These constraints are mutually exclusive; using env: avoids the conflict.
       - name: Write cliff.toml
+        env:
+          CLIFF_TOML: |
+            [changelog]
+            header = ""
+            body = """
+            {% for group, commits in commits | group_by(attribute="group") %}
+            ### {{ group | upper_first }}\n
+            {% for commit in commits %}
+            - {{ commit.message | upper_first }}\
+            {% endfor %}
+            {% endfor %}
+            """
+            trim = true
+
+            [git]
+            conventional_commits = true
+            filter_unconventional = true
+            filter_commits = false
+            # Restricts git-cliff to full semver tags only (e.g. v1.2.3).
+            # Excludes alias tags like v1 and v1.2 which would corrupt version detection.
+            tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+            initial_tag = "v1.0.0"
+            features_always_bump_minor = true
+            breaking_always_bump_major = true
+
+            commit_parsers = [
+              { message = "^feat", group = "Features" },
+              { message = "^fix\\(deps\\)", group = "Dependencies" },
+              { message = "^fix", group = "Bug Fixes" },
+              { message = "^perf", group = "Performance" },
+              { message = "^refactor", group = "Refactor" },
+              { message = "^doc", group = "Documentation" },
+              { message = "^style", skip = true },
+              { message = "^test", skip = true },
+              { message = "^chore", skip = true },
+              { message = "^ci", skip = true },
+              { message = "^build", skip = true },
+            ]
         run: |
-          cat > cliff.toml << 'EOF'
-[changelog]
-header = ""
-body = """
-{% for group, commits in commits | group_by(attribute="group") %}
-### {{ group | upper_first }}\n
-{% for commit in commits %}
-- {{ commit.message | upper_first }}\
-{% endfor %}
-{% endfor %}
-"""
-trim = true
-
-[git]
-conventional_commits = true
-filter_unconventional = true
-filter_commits = false
-# Restricts git-cliff to full semver tags only (e.g. v1.2.3).
-# Excludes alias tags like v1 and v1.2 which would corrupt version detection.
-tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
-initial_tag = "v1.0.0"
-features_always_bump_minor = true
-breaking_always_bump_major = true
-
-commit_parsers = [
-  { message = "^feat", group = "Features" },
-  { message = "^fix\\(deps\\)", group = "Dependencies" },
-  { message = "^fix", group = "Bug Fixes" },
-  { message = "^perf", group = "Performance" },
-  { message = "^refactor", group = "Refactor" },
-  { message = "^doc", group = "Documentation" },
-  { message = "^style", skip = true },
-  { message = "^test", skip = true },
-  { message = "^chore", skip = true },
-  { message = "^ci", skip = true },
-  { message = "^build", skip = true },
-]
-EOF
+          printf '%s\n' "$CLIFF_TOML" > cliff.toml
 
       # The v*.*.* glob excludes alias tags (v1, v1.2) so the baseline version
       # is always a full semver tag. An empty result is valid and means no prior
