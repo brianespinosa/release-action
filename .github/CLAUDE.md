@@ -13,23 +13,14 @@ Guidance for Claude Code working in the `.github/` directory of `release-action`
 
 ## Workflow structure
 
-`release-workflow.yml` has three jobs:
+`release-workflow.yml` has two jobs:
 
 | Job | Runs when |
 |-----|-----------|
-| `init-check` | always |
-| `release` | `inputs.trigger == 'push'` (after `init-check`) |
-| `dependabot-major-prefix` | `inputs.trigger == 'pull_request_target' && github.actor == 'dependabot[bot]'` (after `init-check`) |
-
-`init-check` always runs so the repo settings check fires on PRs as well as on push, blocking a bad merge before it lands rather than only after. Both `release` and `dependabot-major-prefix` declare `needs: init-check`.
-
-**Branch protection requirement:** Rules must require the overall workflow status, not individual job statuses. When `init-check` fails, downstream jobs are skipped (neutral gray), not failed. A rule that only requires `release` to pass will not block merges when `init-check` fails.
+| `release` | `inputs.trigger == 'push'` |
+| `dependabot-major-prefix` | `inputs.trigger == 'pull_request_target' && github.actor == 'dependabot[bot]'` |
 
 The actor check for `dependabot-major-prefix` is at the **job level**, not per-step. This is intentional — a job-level `if:` is the correct GitHub Actions pattern for "this job only applies to a specific actor." Do not move it to individual steps.
-
-### `init-check` job steps
-
-1. **Init check** — assert `allow_squash_merge == true` and `allow_merge_commit == false` via `gh api`; fail with descriptive error if wrong. If both fields are absent from the response (the common case with `github.token`), logs a warning and continues — see "init-check cannot enforce merge settings with github.token" gotcha. Note: `allow_rebase_merge` is intentionally not checked.
 
 ### `release` job steps (in order)
 
@@ -51,11 +42,11 @@ The actor check for `dependabot-major-prefix` is at the **job level**, not per-s
 
 ## Known gotchas
 
-### init-check cannot enforce merge settings with github.token
+### cliff.toml bump settings belong in [bump], not [git] (git-cliff v2)
 
-`allow_squash_merge` and `allow_merge_commit` are only returned by the GitHub REST API (`/repos/{owner}/{repo}`) when the authenticated token has admin access to the repository. Admin is not a grantable scope in the `permissions:` block of a GitHub Actions workflow — the valid scopes are `contents`, `pull-requests`, `actions`, etc. `administration` is not among them.
+In git-cliff v2, `features_always_bump_minor`, `breaking_always_bump_major`, and `initial_tag` moved from the `[git]` section to a dedicated `[bump]` section. Keeping them in `[git]` silently ignores them — git-cliff falls back to its hardcoded default `initial_tag` of `0.1.0`, which then fails the `tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"` validation with a fatal error.
 
-As a result, `init-check` running with `github.token` will always see both fields as absent (`null`) and falls back to a warning rather than a hard failure. The check still enforces misconfiguration when the fields ARE present (e.g., a consumer passes a PAT with admin access as `GH_TOKEN`). Do not change the null-check logic to an error — it would always fail with `github.token`.
+The `Install git-cliff` step uses `continue-on-error: true` as a secondary defense: the action runs git-cliff during install, and any git-cliff error would fail the step. Since we only use that action to install the binary, its run-time result is irrelevant.
 
 ### git-cliff action outputs are broken
 
@@ -111,7 +102,7 @@ This job is safe because it never checks out PR code — it only reads event met
 | `feat(scope)!:` or `BREAKING CHANGE` footer | major | — |
 | `chore`, `ci`, `style`, `test`, `build` | none (skipped) | — |
 
-`features_always_bump_minor = true` and `breaking_always_bump_major = true` are set explicitly in cliff.toml. `perf`, `refactor`, and `doc` produce patch bumps via git-cliff's default behavior (no explicit bump override, no `skip = true`). The `doc` parser uses a prefix match (`^doc`), so both `doc:` and `docs:` commits are matched.
+`features_always_bump_minor = true` and `breaking_always_bump_major = true` are set in the `[bump]` section of cliff.toml (git-cliff v2 moved these from `[git]`). `perf`, `refactor`, and `doc` produce patch bumps via git-cliff's default behavior (no explicit bump override, no `skip = true`). The `doc` parser uses a prefix match (`^doc`), so both `doc:` and `docs:` commits are matched.
 
 ---
 
@@ -121,7 +112,7 @@ This job is safe because it never checks out PR code — it only reads event met
 
 The `dependabot-major-prefix` job rewrites the PR title. That rewritten title becomes the commit message only when squash merging. A regular merge commit preserves original commit messages, causing git-cliff to see `fix(deps):` instead of `feat(deps)!:` and produce the wrong version bump.
 
-The `release` job enforces squash at runtime: it checks `allow_merge_commit == false` via the GitHub API and fails with an error if merge commits are enabled. It does not check `allow_rebase_merge` — consumers should also disable rebase merges, but this is not runtime-enforced.
+Squash merge must be enabled and merge commits must be disabled in the repository settings — these are required for git-cliff to produce correct semver bumps from PR titles used as squash commit messages. This is not runtime-enforced; verify manually when setting up a new consumer.
 
 ---
 
