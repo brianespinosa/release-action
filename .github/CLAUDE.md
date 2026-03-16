@@ -18,25 +18,26 @@ Guidance for Claude Code working in the `.github/` directory of `release-action`
 | Job | Runs when |
 |-----|-----------|
 | `release` | `inputs.trigger == 'push'` |
-| `dependabot-major-prefix` | `inputs.trigger == 'pull_request_target'` |
+| `dependabot-major-prefix` | `inputs.trigger == 'pull_request_target' && github.actor == 'dependabot[bot]'` |
+
+The actor check for `dependabot-major-prefix` is at the **job level**, not per-step. This is intentional — a job-level `if:` is the correct GitHub Actions pattern for "this job only applies to a specific actor." Do not move it to individual steps.
 
 ### `release` job steps (in order)
 
-1. **Init check** — assert `allow_squash_merge == true` and `allow_merge_commit == false` via `gh api`; fail with descriptive error if not
+1. **Init check** — assert `allow_squash_merge == true` and `allow_merge_commit == false` via `gh api`; fail with descriptive error if not. Note: `allow_rebase_merge` is intentionally not checked — consumers should also disable it, but the workflow does not enforce this at runtime.
 2. **Checkout** — `actions/checkout@v4` with `fetch-depth: 0` and `fetch-tags: true`
 3. **Write cliff.toml** — bash heredoc writing bundled config to working directory
-4. **Get current tag** — `git tag --list 'v*.*.*' --sort=-version:refname | head -1`
+4. **Get current tag** — `git tag --list 'v*.*.*' --sort=-version:refname | head -1`; logs whether this is a first release or an existing tag
 5. **Install git-cliff** — `orhun/git-cliff-action@v4` with `args: --bumped-version`
-6. **Check if release needed** — direct binary call; sets `skip` and `version` outputs
+6. **Check if release needed** — direct binary call; sets `skip=true` or `version` output (not both — `skip` is only written when skipping)
 7. **Generate changelog** — `orhun/git-cliff-action@v4`; use `steps.*.outputs.content` for multiline
-8. **Create GitHub Release** — `gh release create`
-9. **Update alias tags** — force-update `vN` and `vN.M` and force-push
+8. **Create GitHub Release** — `gh release create`; guards against empty VERSION and CHANGELOG before running
+9. **Update alias tags** — force-update `vN` and `vN.M` with explicit per-push error handling and recovery instructions
 
 ### `dependabot-major-prefix` job steps
 
-1. **Guard** — `if: github.actor != 'dependabot[bot]'` — exits 0 early (not a failure)
-2. **Fetch metadata** — `dependabot/fetch-metadata@v2`
-3. **Rewrite title** — bash substitution `${PR_TITLE/fix(deps)/feat(deps)!}`; update via `gh pr edit`
+1. **Fetch metadata** — `dependabot/fetch-metadata@v2`
+2. **Rewrite title for major updates** — only runs when `steps.metadata.outputs.update-type == 'version-update:semver-major'`; bash substitution `${PR_TITLE/fix(deps)/feat(deps)!}`; logs before/after; fails if substitution produces no change; updates via `gh pr edit`
 
 ---
 
@@ -44,7 +45,7 @@ Guidance for Claude Code working in the `.github/` directory of `release-action`
 
 ### git-cliff action outputs are broken
 
-`orhun/git-cliff-action@v4` has a jq bug that causes `outputs.stdout` and `outputs.version` to be unreliable. Do NOT use them.
+`orhun/git-cliff-action@v4` has a jq bug that causes `outputs.stdout` and `outputs.version` to be unreliable. Do NOT use them. Confirmed broken as of the initial implementation (2026-03); verify before upgrading the action to a new major version.
 
 - To get the bumped version: export PATH, call `git-cliff --bumped-version` directly
 - PATH to add: `$RUNNER_TEMP/git-cliff/bin` — the binary is NOT added to `$GITHUB_PATH` automatically
@@ -57,22 +58,20 @@ git-cliff and `git tag --list` must both exclude alias tags like `v1` and `v1.2`
 - `tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"` in cliff.toml restricts git-cliff to full semver tags only
 - `git tag --list 'v*.*.*'` glob pattern excludes single-segment and two-segment tags
 
-Never use `git describe` or `git tag --sort` without the glob filter — alias tags will corrupt version detection.
-
 ### Breaking change syntax
 
 git-cliff recognizes `feat(scope)!:` as a breaking change. It does NOT recognize `feat!(scope):`. Always use the `!` after the scope (or after the type if there is no scope).
 
 ### pull_request_target injection risk
 
-The `dependabot-major-prefix` job uses `pull_request_target`, which runs with elevated write permissions. Never interpolate `github.event.pull_request.title` directly in a `run:` block. Always pass it through `env:`:
+The `dependabot-major-prefix` job uses `pull_request_target`, which runs with elevated write permissions. Never interpolate untrusted values directly in a `run:` block. Always pass through `env:`.
 
-```yaml
-env:
-  PR_TITLE: ${{ github.event.pull_request.title }}
-run: |
-  NEW_TITLE="${PR_TITLE/fix(deps)/feat(deps)!}"
-```
+Two values in this job are treated this way:
+
+- `PR_TITLE` — contains user-controlled commit message content from the Dependabot PR
+- `PR_NUMBER` — passed via env for consistency, though not a content-injection risk
+
+The `CHANGELOG` env var in the `release` job's "Create GitHub Release" step applies the same reasoning: changelog content is derived from commit messages (user-controlled). It must stay as `env: CHANGELOG:` and never be inlined as `${{ steps.changelog.outputs.content }}` in the `run:` block.
 
 This job is safe because it never checks out PR code — it only reads event metadata and edits the PR title.
 
@@ -80,15 +79,18 @@ This job is safe because it never checks out PR code — it only reads event met
 
 ## Semver mapping
 
-| Conventional commit | Bump |
-|---------------------|------|
-| `feat` | minor |
-| `fix` | patch |
-| `fix(deps)` | patch (grouped as Dependencies) |
-| `feat(scope)!:` or `BREAKING CHANGE` footer | major |
-| `chore`, `ci`, `style`, `test`, `build` | none (skipped) |
+| Conventional commit | Bump | Changelog group |
+|---------------------|------|-----------------|
+| `feat` | minor | Features |
+| `fix` | patch | Bug Fixes |
+| `fix(deps)` | patch | Dependencies |
+| `perf` | patch | Performance |
+| `refactor` | patch | Refactor |
+| `doc` | patch | Documentation |
+| `feat(scope)!:` or `BREAKING CHANGE` footer | major | — |
+| `chore`, `ci`, `style`, `test`, `build` | none (skipped) | — |
 
-`features_always_bump_minor = true` and `breaking_always_bump_major = true` are set explicitly in cliff.toml.
+`features_always_bump_minor = true` and `breaking_always_bump_major = true` are set explicitly in cliff.toml. `perf`, `refactor`, and `doc` produce patch bumps via git-cliff's default behavior (no explicit bump override, no `skip = true`).
 
 ---
 
@@ -98,10 +100,12 @@ This job is safe because it never checks out PR code — it only reads event met
 
 The `dependabot-major-prefix` job rewrites the PR title. That rewritten title becomes the commit message only when squash merging. A regular merge commit preserves original commit messages, causing git-cliff to see `fix(deps):` instead of `feat(deps)!:` and produce the wrong version bump.
 
-The `release` job enforces this at runtime: it checks `allow_merge_commit == false` via the GitHub API and fails with an error if merge commits are enabled on the repository.
+The `release` job enforces squash at runtime: it checks `allow_merge_commit == false` via the GitHub API and fails with an error if merge commits are enabled. It does not check `allow_rebase_merge` — consumers should also disable rebase merges, but this is not runtime-enforced.
 
 ---
 
 ## Dependabot configuration
 
 `dependabot.yml` targets `github-actions` ecosystem only. All updates use `fix(deps):` as the commit prefix. Major version bumps get their PR title rewritten to `feat(deps)!:` by the `dependabot-major-prefix` workflow job.
+
+The `pull_request_target` trigger includes both `opened` and `reopened` event types. The `reopened` type is intentional — Dependabot PRs can be closed and reopened when the base branch changes, and the title rewrite must fire again in that case.

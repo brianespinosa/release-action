@@ -18,8 +18,9 @@ jobs:
       - name: Init check
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
         run: |
-          REPO_DATA=$(gh api /repos/${{ github.repository }})
+          REPO_DATA=$(gh api "/repos/$REPO")
           SQUASH=$(echo "$REPO_DATA" | jq -r '.allow_squash_merge')
           MERGE=$(echo "$REPO_DATA" | jq -r '.allow_merge_commit')
 
@@ -79,6 +80,11 @@ jobs:
         id: current
         run: |
           TAG=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
+          if [[ -z "$TAG" ]]; then
+            echo "No existing semver tags found. Treating as first release."
+          else
+            echo "Current latest tag: ${TAG}"
+          fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       - name: Install git-cliff
@@ -90,14 +96,20 @@ jobs:
         id: check
         run: |
           export PATH="$RUNNER_TEMP/git-cliff/bin:$PATH"
-          BUMPED=$(git-cliff --bumped-version 2>/dev/null)
+
+          if ! BUMPED=$(git-cliff --bumped-version 2>&1); then
+            echo "ERROR: git-cliff --bumped-version failed."
+            echo "Output: ${BUMPED}"
+            echo "PATH used: $PATH"
+            exit 1
+          fi
+
           CURRENT="${{ steps.current.outputs.tag }}"
 
           if [[ -z "$BUMPED" || "$BUMPED" == "$CURRENT" ]]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "No version bump needed. Skipping release."
+            echo "No version bump needed (git-cliff returned '${BUMPED}', current is '${CURRENT}'). Skipping release."
           else
-            echo "skip=false" >> "$GITHUB_OUTPUT"
             echo "version=${BUMPED}" >> "$GITHUB_OUTPUT"
             echo "Next version: ${BUMPED}"
           fi
@@ -116,9 +128,28 @@ jobs:
           VERSION: ${{ steps.check.outputs.version }}
           CHANGELOG: ${{ steps.changelog.outputs.content }}
         run: |
-          gh release create "$VERSION" \
+          if [[ -z "$VERSION" ]]; then
+            echo "ERROR: VERSION is empty. The 'check' step did not produce a version output."
+            exit 1
+          fi
+
+          if [[ -z "$CHANGELOG" ]]; then
+            echo "ERROR: CHANGELOG is empty. The 'changelog' step did not produce content."
+            echo "  This may indicate the orhun/git-cliff-action outputs.content bug has regressed."
+            exit 1
+          fi
+
+          echo "Creating GitHub release '${VERSION}' targeting ${GITHUB_SHA}"
+
+          if ! gh release create "$VERSION" \
             --notes "$CHANGELOG" \
-            --target "$GITHUB_SHA"
+            --target "$GITHUB_SHA"; then
+            echo "ERROR: 'gh release create' failed for version '${VERSION}'."
+            echo "  If this is a re-run, the release may already exist."
+            exit 1
+          fi
+
+          echo "Successfully created release ${VERSION}"
 
       - name: Update alias tags
         if: steps.check.outputs.skip != 'true'
@@ -131,38 +162,60 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          git tag -f "$MAJOR" "${{ github.sha }}"
-          git tag -f "$MINOR" "${{ github.sha }}"
+          git tag -f "$MAJOR" "$GITHUB_SHA"
+          git tag -f "$MINOR" "$GITHUB_SHA"
 
-          git push origin "$MAJOR" --force
-          git push origin "$MINOR" --force
+          echo "Pushing alias tag ${MAJOR} -> ${GITHUB_SHA}"
+          if ! git push origin "$MAJOR" --force; then
+            echo "ERROR: Failed to force-push alias tag '${MAJOR}'."
+            echo "  Version: ${VERSION}, Target: ${GITHUB_SHA}"
+            echo "  Recovery: git tag -f ${MAJOR} ${GITHUB_SHA} && git push origin ${MAJOR} --force"
+            exit 1
+          fi
+          echo "Successfully pushed ${MAJOR}"
+
+          echo "Pushing alias tag ${MINOR} -> ${GITHUB_SHA}"
+          if ! git push origin "$MINOR" --force; then
+            echo "ERROR: Failed to force-push alias tag '${MINOR}'."
+            echo "  Version: ${VERSION}, Target: ${GITHUB_SHA}"
+            echo "  Note: '${MAJOR}' was updated successfully. Only '${MINOR}' failed."
+            echo "  Recovery: git tag -f ${MINOR} ${GITHUB_SHA} && git push origin ${MINOR} --force"
+            exit 1
+          fi
+          echo "Successfully pushed ${MINOR}"
 
   dependabot-major-prefix:
-    if: inputs.trigger == 'pull_request_target'
+    if: inputs.trigger == 'pull_request_target' && github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
     steps:
-      - name: Guard
-        if: github.actor != 'dependabot[bot]'
-        run: |
-          echo "Actor is not dependabot[bot]. Skipping."
-          exit 0
-
       - name: Fetch metadata
         id: metadata
-        if: github.actor == 'dependabot[bot]'
         uses: dependabot/fetch-metadata@v2
 
       - name: Rewrite title for major updates
-        if: >
-          github.actor == 'dependabot[bot]' &&
-          steps.metadata.outputs.update-type == 'version-update:semver-major'
+        if: steps.metadata.outputs.update-type == 'version-update:semver-major'
         env:
           GH_TOKEN: ${{ github.token }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           NEW_TITLE="${PR_TITLE/fix(deps)/feat(deps)!}"
-          gh pr edit "$PR_NUMBER" --title "$NEW_TITLE"
+
+          if [[ "$NEW_TITLE" == "$PR_TITLE" ]]; then
+            echo "WARNING: Title substitution produced no change."
+            echo "  Original title: '${PR_TITLE}'"
+            echo "  Expected pattern 'fix(deps)' not found. Check dependabot commit-message prefix configuration."
+            exit 1
+          fi
+
+          echo "Rewriting PR #${PR_NUMBER} title:"
+          echo "  Before: '${PR_TITLE}'"
+          echo "  After:  '${NEW_TITLE}'"
+
+          if ! gh pr edit "$PR_NUMBER" --title "$NEW_TITLE"; then
+            echo "ERROR: Failed to update PR #${PR_NUMBER} title to '${NEW_TITLE}'."
+            exit 1
+          fi

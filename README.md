@@ -50,3 +50,4 @@ jobs:
 - Consuming repositories must have merge commits disabled and squash merge enabled — the workflow will fail on the first run if this is not the case
 - Consuming repositories must use conventional commits for PR titles
 - The workflow skips automatically when no version-bump-worthy commits exist since the last tag
+- The `pull_request_target` trigger includes `reopened` intentionally — Dependabot PRs can be closed and reopened when the base branch changes, and the title rewrite must fire again in that case
