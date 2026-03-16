@@ -9,58 +9,6 @@ on:
         type: string
 
 jobs:
-  # Runs on every trigger (push and pull_request_target) to catch misconfigured
-  # repository settings before a bad merge can land. Squash merge must be enabled
-  # and merge commits must be disabled — both are required for git-cliff to produce
-  # correct semver bumps from PR titles used as squash commit messages.
-  #
-  # IMPORTANT: Branch protection rules must require the overall workflow status,
-  # not individual job statuses. When init-check fails, downstream jobs are
-  # skipped (neutral) not failed. A rule requiring only 'release' to pass
-  # will not block merges when init-check fails.
-  init-check:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Init check
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-        run: |
-          if ! REPO_DATA=$(gh api "/repos/$REPO"); then
-            echo "ERROR: gh api call failed for repo '${REPO}'."
-            echo "  Check that GH_TOKEN is valid and has repository read scope."
-            exit 1
-          fi
-
-          SQUASH=$(echo "$REPO_DATA" | jq -r '.allow_squash_merge')
-          MERGE=$(echo "$REPO_DATA" | jq -r '.allow_merge_commit')
-
-          # GitHub only returns allow_squash_merge and allow_merge_commit for tokens
-          # with admin access. The github.token in a workflow_call context only has
-          # the scopes granted in permissions: — admin is not a grantable scope.
-          # When both fields are absent, degrade gracefully: warn and skip the check.
-          # If only one field is absent that is unexpected and treated as an error.
-          if [[ "$SQUASH" == "null" && "$MERGE" == "null" ]]; then
-            echo "WARNING: Merge settings are not visible with the current token permissions."
-            echo "  allow_squash_merge and allow_merge_commit require admin API access."
-            echo "  Cannot enforce merge configuration at runtime with github.token."
-            echo "  Verify manually: allow_squash_merge=true, allow_merge_commit=false."
-          elif [[ "$SQUASH" == "null" || "$MERGE" == "null" ]]; then
-            echo "ERROR: Unexpected partial API response — only some merge setting fields were returned."
-            echo "  allow_squash_merge: ${SQUASH}"
-            echo "  allow_merge_commit: ${MERGE}"
-            exit 1
-          elif [[ "$SQUASH" != "true" || "$MERGE" != "false" ]]; then
-            echo "ERROR: Repository must have squash merge enabled and merge commits disabled."
-            echo "  allow_squash_merge: $SQUASH (expected: true)"
-            echo "  allow_merge_commit: $MERGE (expected: false)"
-            exit 1
-          else
-            echo "Repository merge settings verified: squash merge enabled, merge commits disabled."
-          fi
-
   # Runs when the caller passes trigger: push — by convention, when the calling
   # workflow's push event fires on the main branch. The branch filter is enforced
   # by the caller, not by this reusable workflow.
@@ -70,7 +18,6 @@ jobs:
   # version-bump-worthy commits exist since the last tag.
   release:
     if: inputs.trigger == 'push'
-    needs: init-check
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -349,7 +296,6 @@ jobs:
   # the full repo token. Safe because PR code is never checked out.
   dependabot-major-prefix:
     if: inputs.trigger == 'pull_request_target' && github.actor == 'dependabot[bot]'
-    needs: init-check
     runs-on: ubuntu-latest
     permissions:
       contents: read
