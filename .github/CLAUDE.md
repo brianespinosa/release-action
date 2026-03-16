@@ -29,7 +29,7 @@ The actor check for `dependabot-major-prefix` is at the **job level**, not per-s
 
 ### `init-check` job steps
 
-1. **Init check** — assert `allow_squash_merge == true` and `allow_merge_commit == false` via `gh api`; fail with descriptive error if not. Note: `allow_rebase_merge` is intentionally not checked — consumers should also disable it, but the workflow does not enforce this at runtime.
+1. **Init check** — assert `allow_squash_merge == true` and `allow_merge_commit == false` via `gh api`; fail with descriptive error if wrong. If both fields are absent from the response (the common case with `github.token`), logs a warning and continues — see "init-check cannot enforce merge settings with github.token" gotcha. Note: `allow_rebase_merge` is intentionally not checked.
 
 ### `release` job steps (in order)
 
@@ -50,6 +50,12 @@ The actor check for `dependabot-major-prefix` is at the **job level**, not per-s
 ---
 
 ## Known gotchas
+
+### init-check cannot enforce merge settings with github.token
+
+`allow_squash_merge` and `allow_merge_commit` are only returned by the GitHub REST API (`/repos/{owner}/{repo}`) when the authenticated token has admin access to the repository. Admin is not a grantable scope in the `permissions:` block of a GitHub Actions workflow — the valid scopes are `contents`, `pull-requests`, `actions`, etc. `administration` is not among them.
+
+As a result, `init-check` running with `github.token` will always see both fields as absent (`null`) and falls back to a warning rather than a hard failure. The check still enforces misconfiguration when the fields ARE present (e.g., a consumer passes a PAT with admin access as `GH_TOKEN`). Do not change the null-check logic to an error — it would always fail with `github.token`.
 
 ### git-cliff action outputs are broken
 
