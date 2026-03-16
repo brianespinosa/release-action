@@ -37,7 +37,7 @@ permissions:
 
 jobs:
   release:
-    uses: brianespinosa/release-action/.github/workflows/release-workflow.yml@v1
+    uses: brianespinosa/release-action/.github/workflows/release-workflow.yml@main
     with:
       trigger: ${{ github.event_name }}
     secrets: inherit
