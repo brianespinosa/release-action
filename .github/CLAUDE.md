@@ -57,6 +57,12 @@ The actor check for `dependabot-major-prefix` is at the **job level**, not per-s
 
 As a result, `init-check` running with `github.token` will always see both fields as absent (`null`) and falls back to a warning rather than a hard failure. The check still enforces misconfiguration when the fields ARE present (e.g., a consumer passes a PAT with admin access as `GH_TOKEN`). Do not change the null-check logic to an error — it would always fail with `github.token`.
 
+### cliff.toml bump settings belong in [bump], not [git] (git-cliff v2)
+
+In git-cliff v2, `features_always_bump_minor`, `breaking_always_bump_major`, and `initial_tag` moved from the `[git]` section to a dedicated `[bump]` section. Keeping them in `[git]` silently ignores them — git-cliff falls back to its hardcoded default `initial_tag` of `0.1.0`, which then fails the `tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"` validation with a fatal error.
+
+The `Install git-cliff` step uses `continue-on-error: true` as a secondary defense: the action runs git-cliff during install, and any git-cliff error would fail the step. Since we only use that action to install the binary, its run-time result is irrelevant.
+
 ### git-cliff action outputs are broken
 
 `orhun/git-cliff-action@v4` has a jq bug that causes `outputs.stdout` and `outputs.version` to be unreliable. Do NOT use them. Confirmed broken at `orhun/git-cliff-action@v4`; re-verify when upgrading to a new major version before removing the direct binary call workaround.
@@ -111,7 +117,7 @@ This job is safe because it never checks out PR code — it only reads event met
 | `feat(scope)!:` or `BREAKING CHANGE` footer | major | — |
 | `chore`, `ci`, `style`, `test`, `build` | none (skipped) | — |
 
-`features_always_bump_minor = true` and `breaking_always_bump_major = true` are set explicitly in cliff.toml. `perf`, `refactor`, and `doc` produce patch bumps via git-cliff's default behavior (no explicit bump override, no `skip = true`). The `doc` parser uses a prefix match (`^doc`), so both `doc:` and `docs:` commits are matched.
+`features_always_bump_minor = true` and `breaking_always_bump_major = true` are set in the `[bump]` section of cliff.toml (git-cliff v2 moved these from `[git]`). `perf`, `refactor`, and `doc` produce patch bumps via git-cliff's default behavior (no explicit bump override, no `skip = true`). The `doc` parser uses a prefix match (`^doc`), so both `doc:` and `docs:` commits are matched.
 
 ---
 

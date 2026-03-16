@@ -109,9 +109,6 @@ jobs:
             # Restricts git-cliff to full semver tags only (e.g. v1.2.3).
             # Excludes alias tags like v1 and v1.2 which would corrupt version detection.
             tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
-            initial_tag = "v1.0.0"
-            features_always_bump_minor = true
-            breaking_always_bump_major = true
 
             commit_parsers = [
               { message = "^feat", group = "Features" },
@@ -126,6 +123,14 @@ jobs:
               { message = "^ci", skip = true },
               { message = "^build", skip = true },
             ]
+
+            # git-cliff v2 moved bump settings out of [git] into a dedicated [bump] section.
+            # Keeping them in [git] silently ignores them and falls back to the hardcoded
+            # default initial_tag of 0.1.0, which fails the tag_pattern validation.
+            [bump]
+            features_always_bump_minor = true
+            breaking_always_bump_major = true
+            initial_tag = "v1.0.0"
         run: |
           printf '%s\n' "$CLIFF_TOML" > cliff.toml
 
@@ -153,10 +158,14 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
       # The action installs the git-cliff binary into $RUNNER_TEMP/git-cliff/bin.
-      # NOTE: outputs.version and outputs.stdout from this action are broken due to
-      # a jq bug — do not use them. The binary is called directly in subsequent steps.
+      # NOTE: All action outputs are unreliable due to a jq bug — do not use them.
+      # The binary is called directly in subsequent steps.
+      # continue-on-error: true because the action also runs git-cliff (with
+      # args: --bumped-version) and any git-cliff error would fail this step. Since
+      # we only use this action to install the binary, a run-time error is irrelevant.
       - name: Install git-cliff
         uses: orhun/git-cliff-action@v4
+        continue-on-error: true
         with:
           args: --bumped-version
 
