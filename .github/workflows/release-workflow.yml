@@ -74,7 +74,7 @@ jobs:
       # repos so that all consumers share a single canonical configuration.
       - name: Write cliff.toml
         run: |
-          if ! cat > cliff.toml << 'EOF'
+          cat > cliff.toml << 'EOF'
 [changelog]
 header = ""
 body = """
@@ -112,16 +112,13 @@ commit_parsers = [
   { message = "^build", skip = true },
 ]
 EOF
-          then
-            echo "ERROR: Failed to write cliff.toml to working directory."
-            exit 1
-          fi
 
       # The v*.*.* glob excludes alias tags (v1, v1.2) so the baseline version
-      # is always a full semver tag. An empty result means no prior releases exist
-      # and git-cliff will use initial_tag from cliff.toml as the starting point.
-      # git tag --list exit code is checked separately from head -1 to distinguish
-      # a real git failure from a valid "no tags" first-release scenario.
+      # is always a full semver tag. An empty result is valid and means no prior
+      # releases exist — git-cliff will use initial_tag from cliff.toml.
+      # git tag --list is error-checked separately from head -1: a git failure
+      # (e.g. missing fetch-tags) is caught and reported; head -1 always succeeds
+      # on an empty list and is run unconditionally.
       - name: Get current tag
         id: current
         run: |
@@ -147,20 +144,40 @@ EOF
         with:
           args: --bumped-version
 
-      # Calls git-cliff directly (action outputs are unreliable — see above).
+      # Sanity check that the binary landed at the expected path. The action does
+      # not add the binary to $GITHUB_PATH, so PATH must be exported explicitly in
+      # each subsequent step that calls git-cliff.
+      - name: Verify git-cliff installation
+        run: |
+          export PATH="$RUNNER_TEMP/git-cliff/bin:$PATH"
+          if ! command -v git-cliff &>/dev/null; then
+            echo "ERROR: git-cliff binary not found at $RUNNER_TEMP/git-cliff/bin."
+            echo "  The orhun/git-cliff-action install path may have changed."
+            exit 1
+          fi
+          git-cliff --version
+
+      # Calls git-cliff directly (action outputs are unreliable — see Install git-cliff).
       # Sets skip=true when there are no bump-worthy commits, otherwise sets version.
-      # stderr is captured alongside stdout so tool errors surface rather than
-      # silently resolving to an empty BUMPED value and a false skip=true.
+      # stderr is captured to a temp file so warnings cannot contaminate the version
+      # string written to GITHUB_OUTPUT.
       - name: Check if release needed
         id: check
         run: |
           export PATH="$RUNNER_TEMP/git-cliff/bin:$PATH"
 
-          if ! BUMPED=$(git-cliff --bumped-version 2>&1); then
-            echo "ERROR: git-cliff --bumped-version failed."
-            echo "Output: ${BUMPED}"
-            echo "PATH used: $PATH"
+          BUMPED=$(git-cliff --bumped-version 2>/tmp/git-cliff-stderr)
+          CLIFF_EXIT=$?
+          if [[ $CLIFF_EXIT -ne 0 ]]; then
+            echo "ERROR: git-cliff --bumped-version failed (exit $CLIFF_EXIT)."
+            echo "  Stdout: ${BUMPED}"
+            echo "  Stderr: $(cat /tmp/git-cliff-stderr)"
+            echo "  PATH used: $PATH"
             exit 1
+          fi
+          CLIFF_STDERR=$(cat /tmp/git-cliff-stderr)
+          if [[ -n "$CLIFF_STDERR" ]]; then
+            echo "WARNING: git-cliff wrote to stderr: ${CLIFF_STDERR}"
           fi
 
           CURRENT="${{ steps.current.outputs.tag }}"
@@ -173,10 +190,11 @@ EOF
             echo "Next version: ${BUMPED}"
           fi
 
-      # Calls git-cliff directly to avoid expression interpolation of the version
-      # value in an action's args: input. VERSION is passed via env. Multiline
-      # output is written to GITHUB_OUTPUT using the heredoc delimiter syntax so
-      # the downstream step can reference it as steps.changelog.outputs.content.
+      # Calls git-cliff directly (action outputs are unreliable — see Install git-cliff).
+      # VERSION is passed via env rather than inlined in args: to avoid expression
+      # interpolation. Multiline output is written to GITHUB_OUTPUT using the heredoc
+      # delimiter syntax so the downstream step can read it as steps.changelog.outputs.content.
+      # stderr is captured to a temp file so warnings cannot contaminate the changelog content.
       - name: Generate changelog
         id: changelog
         if: steps.check.outputs.skip != 'true'
@@ -185,10 +203,17 @@ EOF
         run: |
           export PATH="$RUNNER_TEMP/git-cliff/bin:$PATH"
 
-          if ! CHANGELOG=$(git-cliff --unreleased --strip header --tag "$VERSION" 2>&1); then
-            echo "ERROR: git-cliff failed to generate changelog for version '${VERSION}'."
-            echo "Output: ${CHANGELOG}"
+          CHANGELOG=$(git-cliff --unreleased --strip header --tag "$VERSION" 2>/tmp/git-cliff-stderr)
+          CLIFF_EXIT=$?
+          if [[ $CLIFF_EXIT -ne 0 ]]; then
+            echo "ERROR: git-cliff failed to generate changelog for version '${VERSION}' (exit $CLIFF_EXIT)."
+            echo "  Stdout: ${CHANGELOG}"
+            echo "  Stderr: $(cat /tmp/git-cliff-stderr)"
             exit 1
+          fi
+          CLIFF_STDERR=$(cat /tmp/git-cliff-stderr)
+          if [[ -n "$CLIFF_STDERR" ]]; then
+            echo "WARNING: git-cliff wrote to stderr during changelog generation: ${CLIFF_STDERR}"
           fi
 
           {
@@ -200,6 +225,8 @@ EOF
       # CHANGELOG is passed via env rather than inlined as ${{ steps.changelog.outputs.content }}
       # because changelog content is derived from commit messages (user-controlled)
       # and must not be interpolated directly into a run: block.
+      # --notes-file is used instead of --notes to avoid passing commit-message-derived
+      # content as a shell argument.
       - name: Create GitHub Release
         if: steps.check.outputs.skip != 'true'
         env:
@@ -219,44 +246,45 @@ EOF
             exit 1
           fi
 
+          NOTES_FILE=$(mktemp)
+          echo "$CHANGELOG" > "$NOTES_FILE"
+
           echo "Creating GitHub release '${VERSION}' targeting ${GITHUB_SHA}"
 
           if ! gh release create "$VERSION" \
-            --notes "$CHANGELOG" \
+            --notes-file "$NOTES_FILE" \
             --target "$GITHUB_SHA"; then
             echo "ERROR: 'gh release create' failed for version '${VERSION}'."
             echo "  If this is a re-run, the release may already exist."
+            rm -f "$NOTES_FILE"
             exit 1
           fi
 
+          rm -f "$NOTES_FILE"
           echo "Successfully created release ${VERSION}"
 
       # Alias tags (vN, vN.M) allow consumers to pin to a major or minor version
       # without tracking patch releases. They are force-pushed to the new commit
       # after each release. Each push is handled separately so a failure on the
       # first does not silently leave the second tag in a stale state.
+      # git config identity is set defensively — these are lightweight tags (no -a/-m
+      # flag) and do not embed author information, but some environments require it.
       - name: Update alias tags
         if: steps.check.outputs.skip != 'true'
         env:
           VERSION: ${{ steps.check.outputs.version }}
         run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: VERSION '${VERSION}' does not match expected format vMAJOR.MINOR.PATCH."
+            echo "  Refusing to create alias tags from a malformed version string."
+            exit 1
+          fi
+
           MAJOR=$(echo "$VERSION" | cut -d. -f1)
           MINOR=$(echo "$VERSION" | cut -d. -f1-2)
 
-          if [[ -z "$MAJOR" || -z "$MINOR" ]]; then
-            echo "ERROR: Could not derive alias tag names from VERSION='${VERSION}'."
-            echo "  Expected format: vMAJOR.MINOR.PATCH (e.g. v1.2.3)"
-            exit 1
-          fi
-
-          if ! git config user.name "github-actions[bot]"; then
-            echo "ERROR: Failed to set git user.name."
-            exit 1
-          fi
-          if ! git config user.email "github-actions[bot]@users.noreply.github.com"; then
-            echo "ERROR: Failed to set git user.email."
-            exit 1
-          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
           if ! git tag -f "$MAJOR" "$GITHUB_SHA"; then
             echo "ERROR: Failed to create local alias tag '${MAJOR}' pointing to ${GITHUB_SHA}."
@@ -290,8 +318,10 @@ EOF
   # assign different commit prefixes per semver update type, so this job detects
   # major version bumps and rewrites the PR title from fix(deps): to feat(deps)!:
   # so that squash-merging produces the correct conventional commit for a major bump.
-  # Uses pull_request_target (not pull_request) because Dependabot PRs have read-only
-  # tokens under the pull_request event. Safe because PR code is never checked out.
+  # Uses pull_request_target (not pull_request) because GitHub gives fork-originated
+  # workflows a structurally read-only token under pull_request — explicit permissions:
+  # blocks cannot elevate it. pull_request_target runs in the base branch context with
+  # the full repo token. Safe because PR code is never checked out.
   dependabot-major-prefix:
     if: inputs.trigger == 'pull_request_target' && github.actor == 'dependabot[bot]'
     needs: init-check
@@ -303,6 +333,20 @@ EOF
       - name: Fetch metadata
         id: metadata
         uses: dependabot/fetch-metadata@v2
+
+      # Log the update type so it is visible in CI and verify the action produced
+      # a value — an empty output would silently skip the title rewrite, causing a
+      # major Dependabot update to be merged with the wrong semver bump.
+      - name: Log update type
+        env:
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        run: |
+          if [[ -z "$UPDATE_TYPE" ]]; then
+            echo "ERROR: fetch-metadata produced no update-type output."
+            echo "  This may indicate the action's output format has changed."
+            exit 1
+          fi
+          echo "Dependabot update-type: ${UPDATE_TYPE}"
 
       # PR_TITLE is passed via env rather than inlined in the run: block to prevent
       # shell injection — pull_request_target runs with write permissions and PR titles

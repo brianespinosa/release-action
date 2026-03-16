@@ -36,9 +36,9 @@ The actor check for `dependabot-major-prefix` is at the **job level**, not per-s
 1. **Checkout** — `actions/checkout@v4` with `fetch-depth: 0` and `fetch-tags: true`
 2. **Write cliff.toml** — bash heredoc writing bundled config to working directory
 3. **Get current tag** — `git tag --list 'v*.*.*' --sort=-version:refname | head -1`; logs whether this is a first release or an existing tag
-4. **Install git-cliff** — `orhun/git-cliff-action@v4` with `args: --bumped-version`
-5. **Check if release needed** — direct binary call; sets `skip=true` or `version` output (not both — `skip` is only written when skipping)
-6. **Generate changelog** — direct binary call; VERSION passed via env; multiline output written to `$GITHUB_OUTPUT` using `content<<CLIFF_OUTPUT` delimiter syntax
+4. **Install git-cliff** — `orhun/git-cliff-action@v4` with `args: --bumped-version`; followed by a **Verify git-cliff installation** step that confirms the binary is present at `$RUNNER_TEMP/git-cliff/bin`
+5. **Check if release needed** — direct binary call; stderr captured to temp file (not merged with stdout) to prevent warnings contaminating the version string; sets `skip=true` or `version` output (not both — `skip` is only written when skipping)
+6. **Generate changelog** — direct binary call; VERSION passed via env; stderr captured to temp file; multiline output written to `$GITHUB_OUTPUT` using `content<<CLIFF_OUTPUT` delimiter syntax
 7. **Create GitHub Release** — `gh release create`; guards against empty VERSION and CHANGELOG before running
 8. **Update alias tags** — force-update `vN` and `vN.M` with explicit per-push error handling and recovery instructions
 
@@ -58,7 +58,7 @@ The actor check for `dependabot-major-prefix` is at the **job level**, not per-s
 - To get the bumped version: export PATH, call `git-cliff --bumped-version` directly
 - To generate the changelog: call `git-cliff --unreleased --strip header --tag "$VERSION"` directly; write multiline output to `$GITHUB_OUTPUT` using the `content<<CLIFF_OUTPUT` heredoc delimiter syntax
 - PATH to add: `$RUNNER_TEMP/git-cliff/bin` — the binary is NOT added to `$GITHUB_PATH` automatically
-- `outputs.content` is the one output that works correctly and is used to pass the changelog between steps
+- Do NOT use any outputs from the action. The "Generate changelog" step calls the binary directly and writes its own `content` key to `$GITHUB_OUTPUT` using the `content<<CLIFF_OUTPUT` heredoc delimiter. `steps.changelog.outputs.content` refers to that manually-written step output, not anything produced by the git-cliff action itself.
 
 ### Alias tags must be excluded
 
@@ -95,11 +95,11 @@ This job is safe because it never checks out PR code — it only reads event met
 | `fix(deps)` | patch | Dependencies |
 | `perf` | patch | Performance |
 | `refactor` | patch | Refactor |
-| `doc` | patch | Documentation |
+| `doc` / `docs` | patch | Documentation |
 | `feat(scope)!:` or `BREAKING CHANGE` footer | major | — |
 | `chore`, `ci`, `style`, `test`, `build` | none (skipped) | — |
 
-`features_always_bump_minor = true` and `breaking_always_bump_major = true` are set explicitly in cliff.toml. `perf`, `refactor`, and `doc` produce patch bumps via git-cliff's default behavior (no explicit bump override, no `skip = true`).
+`features_always_bump_minor = true` and `breaking_always_bump_major = true` are set explicitly in cliff.toml. `perf`, `refactor`, and `doc` produce patch bumps via git-cliff's default behavior (no explicit bump override, no `skip = true`). The `doc` parser uses a prefix match (`^doc`), so both `doc:` and `docs:` commits are matched.
 
 ---
 

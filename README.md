@@ -52,3 +52,4 @@ jobs:
 - The consuming release workflow must be marked as required in branch protection rules — when `init-check` fails, downstream jobs are skipped (neutral) not failed, so a rule requiring only individual jobs will not block merges
 - The workflow skips automatically when no version-bump-worthy commits exist since the last tag
 - The `pull_request_target` trigger includes `reopened` intentionally — Dependabot PRs can be closed and reopened when the base branch changes, and the title rewrite must fire again in that case
+- The `pull_request_target` trigger intentionally excludes `synchronize` — if Dependabot pushes a new commit to an existing open PR without closing and reopening it, the title rewrite will not re-run. The title set on `opened` persists unless manually changed
