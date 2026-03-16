@@ -13,6 +13,11 @@ jobs:
   # repository settings before a bad merge can land. Squash merge must be enabled
   # and merge commits must be disabled — both are required for git-cliff to produce
   # correct semver bumps from PR titles used as squash commit messages.
+  #
+  # IMPORTANT: Branch protection rules must require the overall workflow status,
+  # not individual job statuses. When init-check fails, downstream jobs are
+  # skipped (neutral) not failed. A rule requiring only 'release' to pass
+  # will not block merges when init-check fails.
   init-check:
     runs-on: ubuntu-latest
     permissions:
@@ -23,9 +28,20 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
         run: |
-          REPO_DATA=$(gh api "/repos/$REPO")
+          if ! REPO_DATA=$(gh api "/repos/$REPO"); then
+            echo "ERROR: gh api call failed for repo '${REPO}'."
+            echo "  Check that GH_TOKEN is valid and has repository read scope."
+            exit 1
+          fi
+
           SQUASH=$(echo "$REPO_DATA" | jq -r '.allow_squash_merge')
           MERGE=$(echo "$REPO_DATA" | jq -r '.allow_merge_commit')
+
+          if [[ "$SQUASH" == "null" || "$MERGE" == "null" ]]; then
+            echo "ERROR: jq could not parse expected fields from API response."
+            echo "  Response: ${REPO_DATA}"
+            exit 1
+          fi
 
           if [[ "$SQUASH" != "true" || "$MERGE" != "false" ]]; then
             echo "ERROR: Repository must have squash merge enabled and merge commits disabled."
@@ -34,10 +50,13 @@ jobs:
             exit 1
           fi
 
-  # Runs on push to main. Calculates the next semver version from conventional
-  # commits since the last tag, generates a changelog, creates a GitHub release,
-  # and force-updates the vN and vN.M alias tags to the new commit. Skips
-  # automatically when no version-bump-worthy commits exist since the last tag.
+  # Runs when the caller passes trigger: push — by convention, when the calling
+  # workflow's push event fires on the main branch. The branch filter is enforced
+  # by the caller, not by this reusable workflow.
+  # Calculates the next semver version from conventional commits since the last
+  # tag, generates a changelog, creates a GitHub release, and force-updates the
+  # vN and vN.M alias tags to the new commit. Skips automatically when no
+  # version-bump-worthy commits exist since the last tag.
   release:
     if: inputs.trigger == 'push'
     needs: init-check
@@ -55,52 +74,64 @@ jobs:
       # repos so that all consumers share a single canonical configuration.
       - name: Write cliff.toml
         run: |
-          cat > cliff.toml << 'EOF'
-          [changelog]
-          header = ""
-          body = """
-          {% for group, commits in commits | group_by(attribute="group") %}
-          ### {{ group | upper_first }}\n
-          {% for commit in commits %}
-          - {{ commit.message | upper_first }}\
-          {% endfor %}
-          {% endfor %}
-          """
-          trim = true
+          if ! cat > cliff.toml << 'EOF'
+[changelog]
+header = ""
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}\n
+{% for commit in commits %}
+- {{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}
+"""
+trim = true
 
-          [git]
-          conventional_commits = true
-          filter_unconventional = true
-          filter_commits = false
-          # Restricts git-cliff to full semver tags only (e.g. v1.2.3).
-          # Excludes alias tags like v1 and v1.2 which would corrupt version detection.
-          tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
-          initial_tag = "v1.0.0"
-          features_always_bump_minor = true
-          breaking_always_bump_major = true
+[git]
+conventional_commits = true
+filter_unconventional = true
+filter_commits = false
+# Restricts git-cliff to full semver tags only (e.g. v1.2.3).
+# Excludes alias tags like v1 and v1.2 which would corrupt version detection.
+tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+initial_tag = "v1.0.0"
+features_always_bump_minor = true
+breaking_always_bump_major = true
 
-          commit_parsers = [
-            { message = "^feat", group = "Features" },
-            { message = "^fix\\(deps\\)", group = "Dependencies" },
-            { message = "^fix", group = "Bug Fixes" },
-            { message = "^perf", group = "Performance" },
-            { message = "^refactor", group = "Refactor" },
-            { message = "^doc", group = "Documentation" },
-            { message = "^style", skip = true },
-            { message = "^test", skip = true },
-            { message = "^chore", skip = true },
-            { message = "^ci", skip = true },
-            { message = "^build", skip = true },
-          ]
-          EOF
+commit_parsers = [
+  { message = "^feat", group = "Features" },
+  { message = "^fix\\(deps\\)", group = "Dependencies" },
+  { message = "^fix", group = "Bug Fixes" },
+  { message = "^perf", group = "Performance" },
+  { message = "^refactor", group = "Refactor" },
+  { message = "^doc", group = "Documentation" },
+  { message = "^style", skip = true },
+  { message = "^test", skip = true },
+  { message = "^chore", skip = true },
+  { message = "^ci", skip = true },
+  { message = "^build", skip = true },
+]
+EOF
+          then
+            echo "ERROR: Failed to write cliff.toml to working directory."
+            exit 1
+          fi
 
-      # The v*.*.*  glob excludes alias tags (v1, v1.2) so the baseline version
+      # The v*.*.* glob excludes alias tags (v1, v1.2) so the baseline version
       # is always a full semver tag. An empty result means no prior releases exist
       # and git-cliff will use initial_tag from cliff.toml as the starting point.
+      # git tag --list exit code is checked separately from head -1 to distinguish
+      # a real git failure from a valid "no tags" first-release scenario.
       - name: Get current tag
         id: current
         run: |
-          TAG=$(git tag --list 'v*.*.*' --sort=-version:refname | head -1)
+          if ! TAG_LIST=$(git tag --list 'v*.*.*' --sort=-version:refname); then
+            echo "ERROR: 'git tag --list' failed. Ensure fetch-depth: 0 and fetch-tags: true are set."
+            exit 1
+          fi
+
+          TAG=$(echo "$TAG_LIST" | head -1)
+
           if [[ -z "$TAG" ]]; then
             echo "No existing semver tags found. Treating as first release."
           else
@@ -110,7 +141,7 @@ jobs:
 
       # The action installs the git-cliff binary into $RUNNER_TEMP/git-cliff/bin.
       # NOTE: outputs.version and outputs.stdout from this action are broken due to
-      # a jq bug — do not use them. The binary is called directly in the next step.
+      # a jq bug — do not use them. The binary is called directly in subsequent steps.
       - name: Install git-cliff
         uses: orhun/git-cliff-action@v4
         with:
@@ -142,14 +173,29 @@ jobs:
             echo "Next version: ${BUMPED}"
           fi
 
-      # Uses outputs.content (heredoc format) rather than outputs.stdout — the
-      # latter is affected by the same jq bug as outputs.version above.
+      # Calls git-cliff directly to avoid expression interpolation of the version
+      # value in an action's args: input. VERSION is passed via env. Multiline
+      # output is written to GITHUB_OUTPUT using the heredoc delimiter syntax so
+      # the downstream step can reference it as steps.changelog.outputs.content.
       - name: Generate changelog
         id: changelog
         if: steps.check.outputs.skip != 'true'
-        uses: orhun/git-cliff-action@v4
-        with:
-          args: --unreleased --strip header --tag ${{ steps.check.outputs.version }}
+        env:
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          export PATH="$RUNNER_TEMP/git-cliff/bin:$PATH"
+
+          if ! CHANGELOG=$(git-cliff --unreleased --strip header --tag "$VERSION" 2>&1); then
+            echo "ERROR: git-cliff failed to generate changelog for version '${VERSION}'."
+            echo "Output: ${CHANGELOG}"
+            exit 1
+          fi
+
+          {
+            echo "content<<CLIFF_OUTPUT"
+            echo "$CHANGELOG"
+            echo "CLIFF_OUTPUT"
+          } >> "$GITHUB_OUTPUT"
 
       # CHANGELOG is passed via env rather than inlined as ${{ steps.changelog.outputs.content }}
       # because changelog content is derived from commit messages (user-controlled)
@@ -168,7 +214,8 @@ jobs:
 
           if [[ -z "$CHANGELOG" ]]; then
             echo "ERROR: CHANGELOG is empty. The 'changelog' step did not produce content."
-            echo "  This may indicate the orhun/git-cliff-action outputs.content bug has regressed."
+            echo "  Check the 'Generate changelog' step logs for git-cliff errors."
+            echo "  If git-cliff succeeded but content is empty, there may be no unreleased commits."
             exit 1
           fi
 
@@ -196,11 +243,29 @@ jobs:
           MAJOR=$(echo "$VERSION" | cut -d. -f1)
           MINOR=$(echo "$VERSION" | cut -d. -f1-2)
 
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [[ -z "$MAJOR" || -z "$MINOR" ]]; then
+            echo "ERROR: Could not derive alias tag names from VERSION='${VERSION}'."
+            echo "  Expected format: vMAJOR.MINOR.PATCH (e.g. v1.2.3)"
+            exit 1
+          fi
 
-          git tag -f "$MAJOR" "$GITHUB_SHA"
-          git tag -f "$MINOR" "$GITHUB_SHA"
+          if ! git config user.name "github-actions[bot]"; then
+            echo "ERROR: Failed to set git user.name."
+            exit 1
+          fi
+          if ! git config user.email "github-actions[bot]@users.noreply.github.com"; then
+            echo "ERROR: Failed to set git user.email."
+            exit 1
+          fi
+
+          if ! git tag -f "$MAJOR" "$GITHUB_SHA"; then
+            echo "ERROR: Failed to create local alias tag '${MAJOR}' pointing to ${GITHUB_SHA}."
+            exit 1
+          fi
+          if ! git tag -f "$MINOR" "$GITHUB_SHA"; then
+            echo "ERROR: Failed to create local alias tag '${MINOR}' pointing to ${GITHUB_SHA}."
+            exit 1
+          fi
 
           echo "Pushing alias tag ${MAJOR} -> ${GITHUB_SHA}"
           if ! git push origin "$MAJOR" --force; then
@@ -252,7 +317,7 @@ jobs:
           NEW_TITLE="${PR_TITLE/fix(deps)/feat(deps)!}"
 
           if [[ "$NEW_TITLE" == "$PR_TITLE" ]]; then
-            echo "WARNING: Title substitution produced no change."
+            echo "ERROR: Title substitution produced no change."
             echo "  Original title: '${PR_TITLE}'"
             echo "  Expected pattern 'fix(deps)' not found. Check dependabot commit-message prefix configuration."
             exit 1

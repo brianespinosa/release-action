@@ -23,6 +23,8 @@ Guidance for Claude Code working in the `.github/` directory of `release-action`
 
 `init-check` always runs so the repo settings check fires on PRs as well as on push, blocking a bad merge before it lands rather than only after. Both `release` and `dependabot-major-prefix` declare `needs: init-check`.
 
+**Branch protection requirement:** Rules must require the overall workflow status, not individual job statuses. When `init-check` fails, downstream jobs are skipped (neutral gray), not failed. A rule that only requires `release` to pass will not block merges when `init-check` fails.
+
 The actor check for `dependabot-major-prefix` is at the **job level**, not per-step. This is intentional — a job-level `if:` is the correct GitHub Actions pattern for "this job only applies to a specific actor." Do not move it to individual steps.
 
 ### `init-check` job steps
@@ -36,7 +38,7 @@ The actor check for `dependabot-major-prefix` is at the **job level**, not per-s
 3. **Get current tag** — `git tag --list 'v*.*.*' --sort=-version:refname | head -1`; logs whether this is a first release or an existing tag
 4. **Install git-cliff** — `orhun/git-cliff-action@v4` with `args: --bumped-version`
 5. **Check if release needed** — direct binary call; sets `skip=true` or `version` output (not both — `skip` is only written when skipping)
-6. **Generate changelog** — `orhun/git-cliff-action@v4`; use `steps.*.outputs.content` for multiline
+6. **Generate changelog** — direct binary call; VERSION passed via env; multiline output written to `$GITHUB_OUTPUT` using `content<<CLIFF_OUTPUT` delimiter syntax
 7. **Create GitHub Release** — `gh release create`; guards against empty VERSION and CHANGELOG before running
 8. **Update alias tags** — force-update `vN` and `vN.M` with explicit per-push error handling and recovery instructions
 
@@ -51,11 +53,12 @@ The actor check for `dependabot-major-prefix` is at the **job level**, not per-s
 
 ### git-cliff action outputs are broken
 
-`orhun/git-cliff-action@v4` has a jq bug that causes `outputs.stdout` and `outputs.version` to be unreliable. Do NOT use them. Confirmed broken as of the initial implementation (2026-03); verify before upgrading the action to a new major version.
+`orhun/git-cliff-action@v4` has a jq bug that causes `outputs.stdout` and `outputs.version` to be unreliable. Do NOT use them. Confirmed broken at `orhun/git-cliff-action@v4`; re-verify when upgrading to a new major version before removing the direct binary call workaround.
 
 - To get the bumped version: export PATH, call `git-cliff --bumped-version` directly
+- To generate the changelog: call `git-cliff --unreleased --strip header --tag "$VERSION"` directly; write multiline output to `$GITHUB_OUTPUT` using the `content<<CLIFF_OUTPUT` heredoc delimiter syntax
 - PATH to add: `$RUNNER_TEMP/git-cliff/bin` — the binary is NOT added to `$GITHUB_PATH` automatically
-- For changelog body: use `steps.<id>.outputs.content` (heredoc format, works for multiline)
+- `outputs.content` is the one output that works correctly and is used to pass the changelog between steps
 
 ### Alias tags must be excluded
 

@@ -45,7 +45,7 @@ jobs:
 
 ## Assumptions
 
-- Squash merge is required; merge commits and rebase merges are not supported
+- Squash merge is required; merge commits are not supported and the workflow enforces this at startup. Rebase merges are also not supported but are not enforced at runtime — consumers must disable them manually
 - Not published to the GitHub Marketplace; personal use only
 - Consuming repositories must have merge commits disabled and squash merge enabled — the workflow will fail on the first run if this is not the case
 - Consuming repositories must use conventional commits for PR titles
