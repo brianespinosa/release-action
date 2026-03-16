@@ -9,6 +9,10 @@ on:
         type: string
 
 jobs:
+  # Runs on every trigger (push and pull_request_target) to catch misconfigured
+  # repository settings before a bad merge can land. Squash merge must be enabled
+  # and merge commits must be disabled — both are required for git-cliff to produce
+  # correct semver bumps from PR titles used as squash commit messages.
   init-check:
     runs-on: ubuntu-latest
     permissions:
@@ -30,6 +34,10 @@ jobs:
             exit 1
           fi
 
+  # Runs on push to main. Calculates the next semver version from conventional
+  # commits since the last tag, generates a changelog, creates a GitHub release,
+  # and force-updates the vN and vN.M alias tags to the new commit. Skips
+  # automatically when no version-bump-worthy commits exist since the last tag.
   release:
     if: inputs.trigger == 'push'
     needs: init-check
@@ -40,9 +48,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          fetch-tags: true
+          fetch-depth: 0   # full history required for git-cliff to walk all commits
+          fetch-tags: true # tags required to determine the current version baseline
 
+      # The cliff.toml config is bundled here rather than committed to consuming
+      # repos so that all consumers share a single canonical configuration.
       - name: Write cliff.toml
         run: |
           cat > cliff.toml << 'EOF'
@@ -62,6 +72,8 @@ jobs:
           conventional_commits = true
           filter_unconventional = true
           filter_commits = false
+          # Restricts git-cliff to full semver tags only (e.g. v1.2.3).
+          # Excludes alias tags like v1 and v1.2 which would corrupt version detection.
           tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
           initial_tag = "v1.0.0"
           features_always_bump_minor = true
@@ -82,6 +94,9 @@ jobs:
           ]
           EOF
 
+      # The v*.*.*  glob excludes alias tags (v1, v1.2) so the baseline version
+      # is always a full semver tag. An empty result means no prior releases exist
+      # and git-cliff will use initial_tag from cliff.toml as the starting point.
       - name: Get current tag
         id: current
         run: |
@@ -93,11 +108,18 @@ jobs:
           fi
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
+      # The action installs the git-cliff binary into $RUNNER_TEMP/git-cliff/bin.
+      # NOTE: outputs.version and outputs.stdout from this action are broken due to
+      # a jq bug — do not use them. The binary is called directly in the next step.
       - name: Install git-cliff
         uses: orhun/git-cliff-action@v4
         with:
           args: --bumped-version
 
+      # Calls git-cliff directly (action outputs are unreliable — see above).
+      # Sets skip=true when there are no bump-worthy commits, otherwise sets version.
+      # stderr is captured alongside stdout so tool errors surface rather than
+      # silently resolving to an empty BUMPED value and a false skip=true.
       - name: Check if release needed
         id: check
         run: |
@@ -120,6 +142,8 @@ jobs:
             echo "Next version: ${BUMPED}"
           fi
 
+      # Uses outputs.content (heredoc format) rather than outputs.stdout — the
+      # latter is affected by the same jq bug as outputs.version above.
       - name: Generate changelog
         id: changelog
         if: steps.check.outputs.skip != 'true'
@@ -127,6 +151,9 @@ jobs:
         with:
           args: --unreleased --strip header --tag ${{ steps.check.outputs.version }}
 
+      # CHANGELOG is passed via env rather than inlined as ${{ steps.changelog.outputs.content }}
+      # because changelog content is derived from commit messages (user-controlled)
+      # and must not be interpolated directly into a run: block.
       - name: Create GitHub Release
         if: steps.check.outputs.skip != 'true'
         env:
@@ -157,6 +184,10 @@ jobs:
 
           echo "Successfully created release ${VERSION}"
 
+      # Alias tags (vN, vN.M) allow consumers to pin to a major or minor version
+      # without tracking patch releases. They are force-pushed to the new commit
+      # after each release. Each push is handled separately so a failure on the
+      # first does not silently leave the second tag in a stale state.
       - name: Update alias tags
         if: steps.check.outputs.skip != 'true'
         env:
@@ -190,6 +221,12 @@ jobs:
           fi
           echo "Successfully pushed ${MINOR}"
 
+  # Runs on pull_request_target for Dependabot PRs only. Dependabot cannot natively
+  # assign different commit prefixes per semver update type, so this job detects
+  # major version bumps and rewrites the PR title from fix(deps): to feat(deps)!:
+  # so that squash-merging produces the correct conventional commit for a major bump.
+  # Uses pull_request_target (not pull_request) because Dependabot PRs have read-only
+  # tokens under the pull_request event. Safe because PR code is never checked out.
   dependabot-major-prefix:
     if: inputs.trigger == 'pull_request_target' && github.actor == 'dependabot[bot]'
     needs: init-check
@@ -202,6 +239,9 @@ jobs:
         id: metadata
         uses: dependabot/fetch-metadata@v2
 
+      # PR_TITLE is passed via env rather than inlined in the run: block to prevent
+      # shell injection — pull_request_target runs with write permissions and PR titles
+      # are user-controlled input.
       - name: Rewrite title for major updates
         if: steps.metadata.outputs.update-type == 'version-update:semver-major'
         env:
