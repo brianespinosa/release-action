@@ -13,26 +13,32 @@ Guidance for Claude Code working in the `.github/` directory of `release-action`
 
 ## Workflow structure
 
-`release-workflow.yml` has two jobs, both gated by the `inputs.trigger` value passed from the caller:
+`release-workflow.yml` has three jobs:
 
 | Job | Runs when |
 |-----|-----------|
-| `release` | `inputs.trigger == 'push'` |
-| `dependabot-major-prefix` | `inputs.trigger == 'pull_request_target' && github.actor == 'dependabot[bot]'` |
+| `init-check` | always |
+| `release` | `inputs.trigger == 'push'` (after `init-check`) |
+| `dependabot-major-prefix` | `inputs.trigger == 'pull_request_target' && github.actor == 'dependabot[bot]'` (after `init-check`) |
+
+`init-check` always runs so the repo settings check fires on PRs as well as on push, blocking a bad merge before it lands rather than only after. Both `release` and `dependabot-major-prefix` declare `needs: init-check`.
 
 The actor check for `dependabot-major-prefix` is at the **job level**, not per-step. This is intentional — a job-level `if:` is the correct GitHub Actions pattern for "this job only applies to a specific actor." Do not move it to individual steps.
 
-### `release` job steps (in order)
+### `init-check` job steps
 
 1. **Init check** — assert `allow_squash_merge == true` and `allow_merge_commit == false` via `gh api`; fail with descriptive error if not. Note: `allow_rebase_merge` is intentionally not checked — consumers should also disable it, but the workflow does not enforce this at runtime.
-2. **Checkout** — `actions/checkout@v4` with `fetch-depth: 0` and `fetch-tags: true`
-3. **Write cliff.toml** — bash heredoc writing bundled config to working directory
-4. **Get current tag** — `git tag --list 'v*.*.*' --sort=-version:refname | head -1`; logs whether this is a first release or an existing tag
-5. **Install git-cliff** — `orhun/git-cliff-action@v4` with `args: --bumped-version`
-6. **Check if release needed** — direct binary call; sets `skip=true` or `version` output (not both — `skip` is only written when skipping)
-7. **Generate changelog** — `orhun/git-cliff-action@v4`; use `steps.*.outputs.content` for multiline
-8. **Create GitHub Release** — `gh release create`; guards against empty VERSION and CHANGELOG before running
-9. **Update alias tags** — force-update `vN` and `vN.M` with explicit per-push error handling and recovery instructions
+
+### `release` job steps (in order)
+
+1. **Checkout** — `actions/checkout@v4` with `fetch-depth: 0` and `fetch-tags: true`
+2. **Write cliff.toml** — bash heredoc writing bundled config to working directory
+3. **Get current tag** — `git tag --list 'v*.*.*' --sort=-version:refname | head -1`; logs whether this is a first release or an existing tag
+4. **Install git-cliff** — `orhun/git-cliff-action@v4` with `args: --bumped-version`
+5. **Check if release needed** — direct binary call; sets `skip=true` or `version` output (not both — `skip` is only written when skipping)
+6. **Generate changelog** — `orhun/git-cliff-action@v4`; use `steps.*.outputs.content` for multiline
+7. **Create GitHub Release** — `gh release create`; guards against empty VERSION and CHANGELOG before running
+8. **Update alias tags** — force-update `vN` and `vN.M` with explicit per-push error handling and recovery instructions
 
 ### `dependabot-major-prefix` job steps
 

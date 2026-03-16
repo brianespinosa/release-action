@@ -9,11 +9,10 @@ on:
         type: string
 
 jobs:
-  release:
-    if: inputs.trigger == 'push'
+  init-check:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Init check
         env:
@@ -31,6 +30,13 @@ jobs:
             exit 1
           fi
 
+  release:
+    if: inputs.trigger == 'push'
+    needs: init-check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -186,6 +192,7 @@ jobs:
 
   dependabot-major-prefix:
     if: inputs.trigger == 'pull_request_target' && github.actor == 'dependabot[bot]'
+    needs: init-check
     runs-on: ubuntu-latest
     permissions:
       contents: read
