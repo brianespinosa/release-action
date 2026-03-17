@@ -1,0 +1,7 @@
+_extends: brianespinosa/settings:actions.yml
+
+repository:
+  name: release-action
+  description: Reusable GitHub Actions workflow for automated semver releases, changelog generation, and alias tag management for composite action repositories.
+  topics: github-actions,reusable-workflow,semver,changelog,release-automation
+  private: false
