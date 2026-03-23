@@ -23,7 +23,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0   # full history required for git-cliff to walk all commits
           fetch-tags: true # tags required to determine the current version baseline
