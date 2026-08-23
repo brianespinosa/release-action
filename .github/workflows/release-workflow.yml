@@ -307,7 +307,7 @@ jobs:
     steps:
       - name: Fetch metadata
         id: metadata
-        uses: dependabot/fetch-metadata@v2
+        uses: dependabot/fetch-metadata@v3
 
       # Log the update type so it is visible in CI and verify the action produced
       # a value — an empty output would silently skip the title rewrite, causing a
